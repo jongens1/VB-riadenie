@@ -56,8 +56,15 @@ Pôvodný Excel sa nemení. Ak chýba samotný stĺpec lokácie, ide stále o ch
 
 ## Pravidlá a obmedzenia
 
-- Cieľ predajného SKU je `ceil(mesačný predaj / 30 × dni)`. Príjem do primáru
-  nikdy neprekročí chýbajúcu cieľovú zásobu. Zvyšok ide do SWAPu, aj keď nie je
+- Cieľ predajného SKU je `ceil(mesačný predaj / 30 × dni)`. Cieľová zásoba
+  spúšťa dopĺňanie primáru, neurčuje horný limit alokácie do vybranej lokácie.
+  Ak je cieľ už pokrytý pred príjmom, celý príjem ide do SWAPu. Inak sa každá
+  vybraná lokácia plní do voľnej kapacity alebo do zostatku príjmu. Po pokrytí
+  cieľa sa ďalšia lokácia nepoužije, aj keď posledná alokácia cieľ prekročí.
+  Príklad: zásoba 5 ks, cieľ 19 ks, príjem 70 ks a prázdna lokácia 60 ks
+  znamená primár 60 ks a SWAP 10 ks. Pri doplnení existujúcej lokácie s 5 ks
+  a kapacitou 60 ks je primárny príjem 55 ks a SWAP 15 ks.
+  Zvyšok ide do SWAPu, aj keď nie je
   dostatok vhodnej kapacity; dôvod je uvedený v pláne.
 - Bezpredajné SKU dopĺňa jednu existujúcu lokáciu alebo otvorí jednu novú.
   Ak má už viac lokácií, nový príjem ide do SWAPu do konsolidácie.

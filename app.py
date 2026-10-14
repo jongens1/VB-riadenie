@@ -217,6 +217,7 @@ def main():
     with putaway_tab:
         with st.container(border=True):
             st.subheader('Naplánovať príjem')
+            st.caption('Cieľová zásoba spúšťa použitie primáru; vybraná lokácia sa plní do voľnej kapacity.')
             pc = resolve_columns(products)
             keys = products[pc['sku']].map(normalize_key).tolist()
             names = dict(zip(keys, products[pc['name']].astype(str))) if pc['name'] else {}
@@ -247,7 +248,10 @@ def main():
                 ('Primárne lokácie', str(primary.location.nunique()), 'Počet lokácií použitých v tomto pláne.'),
             ])
             target = f"{summary['target_stock_needed']} ks" if summary['target_stock_needed'] is not None else 'max. 1 lokácia'
-            st.caption(f"Aktuálna zásoba: {summary['current_stock']} ks · Cieľ primáru: {target} · Horizont: {days} dní")
+            missing = f"{summary['needed_for_target']} ks" if summary['needed_for_target'] is not None else 'pravidlo jednej lokácie'
+            st.caption(f"Aktuálna zásoba: {summary['current_stock']} ks · Cieľ primáru: {target} · Horizont: {days} dní · Chýba do cieľa pred príjmom: {missing}")
+            if summary['needed_for_target'] is not None and primary.quantity.sum() > summary['needed_for_target']:
+                st.caption('Primárna alokácia môže prekročiť cieľ, pretože vybrané lokácie sa plnia do kapacity. Ďalšia lokácia sa už nepoužije.')
             render_putaway_chart(allocations)
             with st.container(border=True):
                 st.subheader('Odporúčané uloženie')
