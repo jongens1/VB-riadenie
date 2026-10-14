@@ -20,8 +20,13 @@ DEFAULT_EXCEL_PATH = "data.xlsx"
 @st.cache_data
 def load_data_from_excel(file_path_or_buffer):
     excel_data = pd.ExcelFile(file_path_or_buffer)
+    sheet_names = excel_data.sheet_names
+    
+    # Dynamická kontrola názvu hárku pre lokácie
+    loc_sheet = 'Locations' if 'Locations' in sheet_names else 'Location'
+    
     df_sku_aktual = pd.read_excel(excel_data, sheet_name='SKU aktuál')
-    df_location = pd.read_excel(excel_data, sheet_name='Location')
+    df_location = pd.read_excel(excel_data, sheet_name=loc_sheet)
     df_produkty = pd.read_excel(excel_data, sheet_name='Produkty')
     return df_sku_aktual, df_location, df_produkty
 
@@ -30,7 +35,7 @@ uploaded_file = st.sidebar.file_uploader("Nahraj vlastný Excel (voliteľné)", 
 
 df_sku_aktual, df_location, df_produkty = None, None, None
 
-# Načítanie: Ak užívateľ nahral vlastný súbor, použijeme ten. Ak nie, použijeme default z GitHubu.
+# Načítanie dát
 if uploaded_file is not None:
     try:
         df_sku_aktual, df_location, df_produkty = load_data_from_excel(uploaded_file)
@@ -72,11 +77,14 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
         'Produkt': list
     }).reset_index()
 
+    # Identifikácia názvu stĺpca pre lokáciu v tabuľke lokácií (Názov lokácie vs Lokácie vs Location)
+    loc_col = 'Názov lokácie' if 'Názov lokácie' in df_location.columns else df_location.columns[0]
+
     # 4. Spojenie lokácií s ich aktuálnym stavom
     df_loc_merged = pd.merge(
         df_location, 
         obsadenost_lokacii, 
-        left_on='Názov lokácie', 
+        left_on=loc_col, 
         right_on='Lokace', 
         how='left'
     )
@@ -90,7 +98,7 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
         
     df_loc_merged['Rovnake_SKU_Pritomne'] = df_loc_merged['Produkt'].apply(has_same_sku)
 
-    # 6. Prioritizácia kandidátov (1. Konsolidácia, 2. Nejmenej obsadené)
+    # 6. Prioritizácia kandidátov (1. Konsolidácia, 2. Najmenej obsadené)
     candidates = df_loc_merged.sort_values(
         by=['Rovnake_SKU_Pritomne', 'Množství'], 
         ascending=[False, True]
@@ -107,7 +115,7 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
     else:
         reason += "dostupnej voľnej kapacity."
 
-    return best_loc['Názov lokácie'], reason
+    return best_loc[loc_col], reason
 
 
 # --- UŽÍVATEĽSKÉ ROZHRANIE ---
@@ -153,7 +161,7 @@ with tab1:
 
 with tab2:
     st.subheader("Náhľad na dáta v systéme")
-    subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Location", "Produkty"])
+    subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations", "Produkty"])
     
     with subtab1:
         st.dataframe(df_sku_aktual, use_container_width=True)
