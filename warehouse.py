@@ -36,9 +36,28 @@ def normalize_key(value):
     return str(value).strip()
 
 
+def exclude_unknown_locations(df_sku_aktual, df_location):
+    """Drop stock outside the location catalogue before validation or calculations."""
+    if df_sku_aktual.columns.duplicated().any() or df_location.columns.duplicated().any():
+        return df_sku_aktual.copy(), []
+    sc, lc = resolve_columns(df_sku_aktual), resolve_columns(df_location)
+    if sc['location'] is None or lc['location'] is None:
+        return df_sku_aktual.copy(), []
+    keys = df_sku_aktual[sc['location']].map(normalize_key)
+    known = set(df_location[lc['location']].map(normalize_key)) - {''}
+    excluded = ~keys.isin(known)
+    warnings = []
+    if excluded.any():
+        locations = sorted(set(keys[excluded]))
+        labels = ', '.join(key or '(prázdna lokácia)' for key in locations[:8])
+        warnings.append(f'Ignorované záznamy zásob: {int(excluded.sum())} riadkov na {len(locations)} neznámych lokáciách ({labels}). Nezapočítavajú sa do zásob, kapacity ani defragmentácie.')
+    return df_sku_aktual.loc[~excluded].copy(), warnings
+
+
 def validate_input_data(df_sku_aktual, df_location, df_produkty):
     """Return errors and warnings; callers must block planning on errors."""
-    errors, warnings = [], []
+    df_sku_aktual, warnings = exclude_unknown_locations(df_sku_aktual, df_location)
+    errors = []
     frames = {'SKU aktuál': df_sku_aktual, 'Locations': df_location, 'Produkty': df_produkty}
     required = {'SKU aktuál': ('sku', 'location', 'quantity'), 'Locations': ('location',), 'Produkty': ('sku',)}
     columns = {name: resolve_columns(df) for name, df in frames.items()}
@@ -80,11 +99,9 @@ def validate_input_data(df_sku_aktual, df_location, df_produkty):
         return errors, warnings
     sc, lc, pc = (columns[n] for n in frames)
     stock_skus = df_sku_aktual[sc['sku']].map(normalize_key)
-    stock_locs = df_sku_aktual[sc['location']].map(normalize_key)
     product_keys = df_produkty[pc['sku']].map(normalize_key)
     location_keys = df_location[lc['location']].map(normalize_key)
-    for label, missing in (('Produkty', set(stock_skus) - set(product_keys)),
-                           ('Locations', set(stock_locs) - set(location_keys))):
+    for label, missing in (('Produkty', set(stock_skus) - set(product_keys)),):
         if missing:
             errors.append(f"Chýbajúce kľúče v {label}: {', '.join(sorted(missing)[:8])} (celkom {len(missing)}).")
     if location_keys.duplicated().any():
@@ -170,6 +187,7 @@ class Warehouse:
         errors, self.warnings = validate_input_data(stock, locations, products)
         if errors:
             raise ValueError('\n'.join(errors))
+        stock, _ = exclude_unknown_locations(stock, locations)
         self.stock, self.products = stock, products
         self.columns = resolve_columns(locations)
         self.locations = {normalize_key(row[self.columns['location']]): row for _, row in locations.iterrows()}
@@ -255,7 +273,7 @@ def plan_putaway(selected_product, total_qty_to_store, days_target,
 
 def analyze_defragmentation(df_sku_aktual, df_location, df_produkty, allow_mixed_sku=False):
     warehouse = Warehouse(df_sku_aktual, df_location, df_produkty)
-    stock = build_location_occupancy(df_sku_aktual)
+    stock = build_location_occupancy(warehouse.stock)
     fragmented = stock.groupby('sku').location.nunique()
     fragmented = fragmented[fragmented > 1]
     moves, freed = [], set()

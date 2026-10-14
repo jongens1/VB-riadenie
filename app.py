@@ -7,6 +7,7 @@ from warehouse import (
     ALLOCATION_COLUMNS, MOVE_COLUMNS, resolve_columns, normalize_key,
     validate_input_data, get_product_info, calculate_location_capacity,
     build_location_occupancy, plan_putaway, analyze_defragmentation,
+    exclude_unknown_locations,
 )
 
 
@@ -51,6 +52,7 @@ def main():
     if errors:
         st.info('Opravte vstupné dáta a nahrajte súbor znova. Výpočty sú pozastavené.')
         st.stop()
+    stock, _ = exclude_unknown_locations(stock, locations)
     st.caption(f"Zdroj: {uploaded.name if uploaded else 'data.xlsx'} · {len(products):,} produktov · {len(locations):,} lokácií")
     putaway_tab, defrag_tab, data_tab = st.tabs(['Príjem a SWAP', 'Uvoľnenie lokácií', 'Vstupné dáta'])
     with putaway_tab:

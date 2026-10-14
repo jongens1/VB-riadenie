@@ -33,8 +33,14 @@ výpočet sa zastaví. Rozmer GeoSize sa neinterpretuje ako fyzický rozmer.
 
 Záporné alebo prázdne predaje znamenajú 0 predajov, stohovateľnosť pod 1 alebo
 prázdna znamená 1; zobrazí sa varovanie. Nečíselné údaje, nekladné rozmery,
-záporné/neceločíselné množstvá, neznáme kľúče a duplicitné kľúče lokácií alebo
+záporné/neceločíselné množstvá, neznáme produktové kľúče a duplicitné kľúče lokácií alebo
 produktov blokujú plán. Duplicitné SKU/lokácie v zásobe sa sčítajú.
+
+Záznamy zásob s lokáciou, ktorá chýba v Locations, sa ignorujú ešte pred
+validáciou ostatných údajov. Zobrazí sa upozornenie s počtom vynechaných riadkov
+a zoznamom lokácií. Tieto riadky neovplyvnia aktuálnu zásobu, rozmery produktu,
+kapacitu, cieľ primáru ani defragmentáciu; nezobrazia sa v náhľade použitej zásoby.
+Pôvodný Excel sa nemení. Ak chýba samotný stĺpec lokácie, ide stále o chybu.
 
 ## Pravidlá a obmedzenia
 

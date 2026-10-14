@@ -123,11 +123,47 @@ class PlanningTests(unittest.TestCase):
 
     def test_validation_blocks_invalid_values_and_keys(self):
         for rows in ([('A', 'L1', -1)], [('A', 'L1', 'oops')], [('A', 'L1', 1.5)],
-                     [('UNKNOWN', 'L1', 1)], [('A', 'UNKNOWN', 1)], [('A', 'L1', float('inf'))]):
+                     [('UNKNOWN', 'L1', 1)], [('A', 'L1', float('inf'))]):
             with self.subTest(rows=rows):
                 self.assertTrue(validate_input_data(*fixture(rows))[0])
                 with self.assertRaises(ValueError):
                     plan_putaway('A', 1, 30, *fixture(rows))
+
+    def test_unknown_locations_do_not_count_toward_target(self):
+        data = fixture([('A', 'L1', 2), ('A', 'UNKNOWN', 100)])
+        errors, warnings = validate_input_data(*data)
+        self.assertEqual(errors, [])
+        self.assertTrue(any('Ignorované' in w for w in warnings))
+        plan, summary = plan_putaway('A', 20, 30, *data)
+        self.assertEqual(summary['current_stock'], 2)
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].sum(), 8)
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 12)
+
+    def test_unknown_locations_do_not_affect_defragmentation(self):
+        moves, freed, fragmented = analyze_defragmentation(*fixture([
+            ('A', 'L1', 2), ('A', 'L2', 3), ('A', 'UNKNOWN', 100)]))
+        self.assertEqual((freed, fragmented), (1, 1))
+        self.assertEqual(moves.quantity.tolist(), [2])
+        self.assertNotIn('UNKNOWN', moves.source.tolist() + moves.target.tolist())
+
+    def test_ignored_rows_are_not_validated_or_used_for_dimensions(self):
+        stock, locations, products = fixture([('A', 'L1', 2), ('MISSING', 'UNKNOWN', 'bad')])
+        self.assertEqual(validate_input_data(stock, locations, products)[0], [])
+        stock, locations, products = fixture([('A', 'L1', 2), ('A', 'UNKNOWN', 100)])
+        products = products.drop(columns=['Šírka'])
+        stock['Šírka'] = [10, 1000]
+        wh = Warehouse(stock, locations, products)
+        self.assertEqual(wh.info('A').width, 10)
+        self.assertEqual(wh.capacity('L1', 'A'), 10)
+
+    def test_all_stock_can_be_ignored(self):
+        data = fixture([('A', 'UNKNOWN', 100)])
+        plan, summary = plan_putaway('A', 3, 30, *data)
+        self.assertEqual(summary['current_stock'], 0)
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].sum(), 3)
+        moves, freed, fragmented = analyze_defragmentation(*data)
+        self.assertTrue(moves.empty)
+        self.assertEqual((freed, fragmented), (0, 0))
 
     def test_validation_required_columns_duplicates_and_dimensions(self):
         stock, locations, products = fixture()
