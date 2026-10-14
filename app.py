@@ -11,14 +11,12 @@ st.set_page_config(
 )
 
 st.title("🏗️ Plánovač Riadenia Zaskladňovania (Veľká Biela)")
-st.caption("Interný nástroj pre optimalizáciu ukladania produktov na lokácie")
+st.caption("Interný nástroj pre optimalizáciu ukladania produktov na lokácie s kontrolou kapacity")
 
-# Názov predvoleného súboru
 DEFAULT_EXCEL_PATH = "data.xlsx"
 
 # --- HELPER PRE INTEGRITU STĹPCOV ---
 def get_column_name(df, candidate_names):
-    """Vráti prvý existujúci názov stĺpca zo zoznamu kandidátov."""
     for name in candidate_names:
         if name in df.columns:
             return name
@@ -61,39 +59,67 @@ else:
     st.stop()
 
 
+# --- VÝPOČET GEOMETRICKEJ KAPACITY LOKÁCIE ---
+def calculate_location_capacity(loc_w, loc_d, loc_h, prod_w, prod_d, prod_h, stackability):
+    """Vypočíta maximálny počet kusov daného produktu, ktorý sa vojde na lokáciu."""
+    if any(v <= 0 or pd.isna(v) for v in [loc_w, loc_d, loc_h, prod_w, prod_d, prod_h]):
+        return 4 # Výpredajová / záložná hodnota ak chýbajú rozmery
+    
+    # 1. Výšková kapacita (Stohovateľnosť vs Výška lokácie)
+    max_stack_by_height = int(loc_h // prod_h)
+    if max_stack_by_height == 0:
+        return 0 # Produkt sa výškovo nevojde
+    
+    eff_stackability = min(int(stackability), max_stack_by_height)
+    
+    # 2. Pôdorysné rozloženie (Možnosť 1: bez rotácie, Možnosť 2: rotácia o 90 deg)
+    fit_orient1 = int(loc_w // prod_w) * int(loc_d // prod_d)
+    fit_orient2 = int(loc_w // prod_d) * int(loc_d // prod_w)
+    
+    max_floor_units = max(fit_orient1, fit_orient2)
+    
+    # 3. Celková max kapacita
+    return max_floor_units * eff_stackability
+
+
 # --- LOGIKA ZASKLADŇOVANIA ---
-def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_produkty):
-    # 1. Identifikácia stĺpcov v 'SKU aktuál' (zohľadňuje Množstvo vs Množství)
+def find_best_locations(selected_produkt, total_qty_to_store, df_sku_aktual, df_location, df_produkty):
     qty_col_sku = get_column_name(df_sku_aktual, ['Množstvo', 'Množství', 'Qty', 'Počet'])
     loc_col_sku = get_column_name(df_sku_aktual, ['Lokace', 'Lokácia', 'Location', 'Názov lokácie'])
     prod_col_sku = get_column_name(df_sku_aktual, ['Produkt', 'SKU', 'Product'])
 
-    if not qty_col_sku or not loc_col_sku:
-        return None, f"V hárku 'SKU aktuál' sa nenašli stĺpce pre lokáciu alebo množstvo."
-
-    # 2. Identifikácia stĺpca v 'Locations'
     loc_col_loc = get_column_name(df_location, ['Názov lokácie', 'Lokace', 'Lokácia', 'Location']) or df_location.columns[0]
+    loc_w_col = get_column_name(df_location, ['Šířka (cm)', 'Šírka (cm)', 'Šírka', 'Šířka'])
+    loc_d_col = get_column_name(df_location, ['Hloubka (cm)', 'Hĺbka (cm)', 'Hloubka', 'Hĺbka'])
+    loc_h_col = get_column_name(df_location, ['Výška (cm)', 'Výška'])
 
-    # 3. Získanie parametrov produktu z 'Produkty'
     prod_col_prod = get_column_name(df_produkty, ['Produkt', 'SKU', 'Product'])
     prod_row = df_produkty[df_produkty[prod_col_prod] == selected_produkt]
     
     if prod_row.empty:
-        return None, "Produkt nebol nájdený v hárku 'Produkty'."
+        return [], "Produkt nebol nájdený v hárku 'Produkty'."
     
     prod_row = prod_row.iloc[0]
-    
     stohovatelnost = prod_row.get('Stohovateľnosť', 1)
     if pd.isna(stohovatelnost) or stohovatelnost < 1:
         stohovatelnost = 1
 
-    # 4. Agregácia obsadenosti lokácií
+    # Získanie rozmerov produktu
+    sku_rows = df_sku_aktual[df_sku_aktual[prod_col_sku] == selected_produkt]
+    if not sku_rows.empty:
+        prod_h = sku_rows.get('Výška', pd.Series([85])).iloc[0]
+        prod_w = sku_rows.get('Šírka', pd.Series([60])).iloc[0]
+        prod_d = sku_rows.get('Hloubka', pd.Series([60])).iloc[0]
+    else:
+        prod_h, prod_w, prod_d = 85, 60, 60 # Výchozie rozmery v cm
+
+    # Agregácia obsadenosti lokácií
     obsadenost_lokacii = df_sku_aktual.groupby(loc_col_sku).agg({
         qty_col_sku: 'sum',
         prod_col_sku: list
     }).reset_index()
 
-    # 5. Spojenie lokácií s ich stavom
+    # Mergnutie dát o lokáciách
     df_loc_merged = pd.merge(
         df_location, 
         obsadenost_lokacii, 
@@ -103,7 +129,18 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
     )
     df_loc_merged[qty_col_sku] = df_loc_merged[qty_col_sku].fillna(0)
     
-    # 6. Pravidlo KONSOLIDÁCIE
+    # Výpočet kapacity pre každú lokáciu
+    def calc_cap(row):
+        l_w = row.get(loc_w_col, 120)
+        l_d = row.get(loc_d_col, 80)
+        l_h = row.get(loc_h_col, 200)
+        return calculate_location_capacity(l_w, l_d, l_h, prod_w, prod_d, prod_h, stohovatelnost)
+
+    df_loc_merged['Max_Kapacita'] = df_loc_merged.apply(calc_cap, axis=1)
+    df_loc_merged['Volna_Kapacita'] = df_loc_merged['Max_Kapacita'] - df_loc_merged[qty_col_sku]
+    df_loc_merged['Volna_Kapacita'] = df_loc_merged['Volna_Kapacita'].apply(lambda x: max(0, x))
+
+    # Pravidlo KONSOLIDÁCIE
     def has_same_sku(sku_list):
         if isinstance(sku_list, list):
             return selected_produkt in sku_list
@@ -111,24 +148,44 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
         
     df_loc_merged['Rovnake_SKU_Pritomne'] = df_loc_merged[prod_col_sku].apply(has_same_sku)
 
-    # 7. Zotriedenie kandidátov (Konsolidácia -> Najmenej obsadená lokácia)
-    candidates = df_loc_merged.sort_values(
-        by=['Rovnake_SKU_Pritomne', qty_col_sku], 
-        ascending=[False, True]
+    # Vyradíme lokácie bez voľnej kapacity
+    df_available = df_loc_merged[df_loc_merged['Volna_Kapacita'] > 0].copy()
+
+    if df_available.empty:
+        return [], "V sklade nezostali žiadne lokácie s voľnou kapacitou pre tento produkt!"
+
+    # Zotriedenie: 1. Konsolidácia, 2. Najviac voľnej kapacity
+    candidates = df_available.sort_values(
+        by=['Rovnake_SKU_Pritomne', 'Volna_Kapacita'], 
+        ascending=[False, False]
     )
 
-    if candidates.empty:
-        return None, "Nenašli sa žiadne dostupné lokácie."
+    # Rozdelenie kusov na lokácie (Split allocation)
+    allocations = []
+    remaining_qty = total_qty_to_store
 
-    best_loc = candidates.iloc[0]
-    
-    reason = "Lokácia vybraná na základe "
-    if best_loc['Rovnake_SKU_Pritomne']:
-        reason += "konsolidácie (rovnaký produkt sa tu už nachádza)."
-    else:
-        reason += "dostupnej voľnej kapacity."
+    for idx, row in candidates.iterrows():
+        if remaining_qty <= 0:
+            break
+            
+        alloc_qty = min(remaining_qty, int(row['Volna_Kapacita']))
+        
+        reason = "Konsolidácia (doplnenie na existujúcu pozíciu)" if row['Rovnake_SKU_Pritomne'] else "Voľná kapacita lokácie"
+        
+        allocations.append({
+            'Location': row[loc_col_loc],
+            'Allocated_Qty': alloc_qty,
+            'Free_Before': int(row['Volna_Kapacita']),
+            'Max_Cap': int(row['Max_Kapacita']),
+            'Reason': reason
+        })
+        
+        remaining_qty -= alloc_qty
 
-    return best_loc[loc_col_loc], reason
+    if remaining_qty > 0:
+        return allocations, f"⚠️ Upozornenie: Podarilo sa naplánovať len {total_qty_to_store - remaining_qty} ks z {total_qty_to_store} ks. Sklad je plný!"
+
+    return allocations, "Úspešne naplánované celkové množstvo."
 
 
 # --- UŽÍVATEĽSKÉ ROZHRANIE ---
@@ -165,8 +222,8 @@ with tab1:
         col_d4.metric("GeoSize", str(geosize_val))
         st.markdown("---")
 
-    if st.button("🚀 Vypočítať optimálnu lokáciu", type="primary"):
-        target_loc, reason = find_best_location(
+    if st.button("🚀 Vypočítať optimálne lokácie", type="primary"):
+        allocations, status_msg = find_best_locations(
             selected_produkt, 
             qty_input, 
             df_sku_aktual, 
@@ -174,11 +231,16 @@ with tab1:
             df_produkty
         )
         
-        if target_loc:
-            st.success(f"📍 **Odporúčaná zaskladňovacia lokácia: `{target_loc}`**")
-            st.info(f"💡 **Dôvod výberu:** {reason}")
-        else:
-            st.error(f"❌ Chyba: {reason}")
+        if "⚠️" in status_msg:
+            st.warning(status_msg)
+        elif allocations:
+            st.success(f"✅ {status_msg}")
+
+        if allocations:
+            st.subheader("📍 Plán zaskladnenia po lokáciách:")
+            alloc_df = pd.DataFrame(allocations)
+            alloc_df.columns = ["Lokácia", "Počet ks na zaskladnenie", "Voľná kapacita pred", "Max Kapacita lokácie", "Dôvod výberu"]
+            st.table(alloc_df)
 
 with tab2:
     st.subheader("Náhľad na dáta v systéme")
