@@ -4,6 +4,18 @@ Streamlit aplikácia navrhuje zaskladnenie príjmu do primáru/SWAPu a presuny,
 ktoré konsolidujú SKU do jednej existujúcej lokácie a uvoľnia zdrojové lokácie.
 Zdrojový Excel sa nemení. Plány možno exportovať do CSV.
 
+Dashboard používa jednotnú tmavomodrú tému (`.streamlit/config.toml`) a CSS
+v `inject_custom_css()`. Hore je krátky súhrn a KPI produktov, lokácií,
+upozornení a zdroja. Podrobnosti dát sú dostupné cez checkbox **Zobraziť
+diagnostiku dát** a zbaliteľné panely; po výpočte sa diagnostika automaticky
+skryje. Chyby blokujúce výpočet zostávajú viditeľné.
+
+Výsledky príjmu obsahujú KPI, donut graf primár/SWAP a tabuľku. Defragmentácia
+obsahuje KPI a stĺpcový graf. Grafy využívajú Vega-Lite podporu v Streamlite,
+takže netreba ďalšiu závislosť. Výsledky zostávajú dostupné pri prepnutí
+diagnostiky; zmena vstupov zneplatní príslušný plán, aby sa neexportovali
+zastarané odporúčania.
+
 ## Spustenie
 
 ```sh
