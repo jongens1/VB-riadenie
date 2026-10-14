@@ -15,6 +15,22 @@ def fixture(rows=(), sales=10):
 
 
 class PlanningTests(unittest.TestCase):
+    def test_sales_2_target_2_inbound_20_capacity_56_all_primary(self):
+        stock, locations, products = fixture(sales=2)
+        locations['Šírka'] = 560
+        self.assertEqual(Warehouse(stock, locations, products).free_capacity('L1', 'A'), 56)
+        plan, summary = plan_putaway('A', 20, 30, stock, locations, products)
+        self.assertEqual((summary['target_stock_needed'], summary['current_stock'], summary['needed_for_target']), (2, 0, 2))
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].sum(), 20)
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 0)
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'free_before'].tolist(), [56])
+        self.assertFalse(any('Cieľová zásoba je pokrytá' in reason for reason in plan.reason))
+
+    def test_target_100_inbound_50_capacity_60_all_primary(self):
+        plan, _ = plan_putaway('A', 50, 30, *self.capacity_fixture(sales=100))
+        self.assertEqual(plan.type.tolist(), ['PRIMARY'])
+        self.assertEqual(plan.quantity.tolist(), [50])
+
     def test_replenishes_existing_location_to_capacity_and_swaps_remainder(self):
         data = fixture([('A', 'L1', 8)])
         plan, summary = plan_putaway('A', 20, 30, *data)

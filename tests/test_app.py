@@ -9,11 +9,14 @@ class AppTests(unittest.TestCase):
     def metrics(self, app):
         return {metric.label: metric.value for metric in app.metric}
 
-    def app(self, invalid=False, unknown=False):
+    def app(self, invalid=False, unknown=False, low_sales=False, legacy=False, stale_import=False):
         from streamlit.testing.v1 import AppTest
         app = AppTest.from_file(str(Path(__file__).with_name('ui_fixture.py')), default_timeout=30)
         app.query_params['invalid'] = '1' if invalid else '0'
         app.query_params['unknown'] = '1' if unknown else '0'
+        app.query_params['low_sales'] = '1' if low_sales else '0'
+        app.query_params['legacy'] = '1' if legacy else '0'
+        app.query_params['stale_import'] = '1' if stale_import else '0'
         return app.run()
 
     def test_valid_ui_plans_and_defragments(self):
@@ -88,6 +91,38 @@ class AppTests(unittest.TestCase):
         app.button[0].click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(app.dataframe[0].value['Počet ks'].sum(), 20)
+
+    def test_low_sales_primary_20_in_kpi_table_and_chart(self):
+        app = self.app(low_sales=True)
+        app.button[0].click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(self.metrics(app)['Do primáru'], '20 ks')
+        self.assertEqual(self.metrics(app)['Do SWAPu'], '0 ks')
+        table = app.dataframe[0].value
+        self.assertEqual(table.loc[table.Typ == 'Primár', 'Počet ks'].sum(), 20)
+        self.assertEqual(table.loc[table.Typ == 'SWAP / nadzásoba', 'Počet ks'].sum(), 0)
+        self.assertTrue(any('20 ks do primáru (100%) · 0 ks do SWAPu (0%)' in c.value for c in app.caption))
+        # Verify the actual Arrow dataset sent to the donut, not only its caption.
+        import pyarrow as pa
+        chart = app.get('arrow_vega_lite_chart')[0].proto
+        dataset = chart.data.data if chart.data.data else chart.datasets[0].data.data
+        chart_data = pa.ipc.open_stream(dataset).read_all().to_pandas()
+        self.assertEqual(chart_data['Počet ks'].tolist(), [20, 0])
+
+    def test_old_target_capped_session_result_is_invalidated(self):
+        app = self.app(low_sales=True, legacy=True)
+        self.assertEqual(len(app.exception), 0)
+        self.assertNotIn('Do primáru', self.metrics(app))
+        app.button[0].click().run()
+        self.assertEqual(self.metrics(app)['Do primáru'], '20 ks')
+        self.assertEqual(self.metrics(app)['Do SWAPu'], '0 ks')
+
+    def test_old_imported_planner_is_reloaded_from_current_source(self):
+        app = self.app(low_sales=True, stale_import=True)
+        app.button[0].click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(self.metrics(app)['Do primáru'], '20 ks')
+        self.assertEqual(self.metrics(app)['Do SWAPu'], '0 ks')
 
 
 if __name__ == '__main__':

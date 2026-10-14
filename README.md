@@ -16,6 +16,12 @@ takže netreba ďalšiu závislosť. Výsledky zostávajú dostupné pri prepnut
 diagnostiky; zmena vstupov zneplatní príslušný plán, aby sa neexportovali
 zastarané odporúčania.
 
+Pravidlá z `warehouse.py` sa načítajú podľa odtlačku aktuálneho zdrojového
+súboru. Po zmene pravidiel sa obnoví importovaný modul a staré uložené plány
+sa zneplatnia. Tým sa predchádza použitiu starého plánovača po aktualizácii
+`app.py`. Pri nasadení nahraďte oba súbory a reštartujte bežiacu aplikáciu
+(na Streamlit Cloud: Manage app → Reboot app).
+
 ## Spustenie
 
 ```sh

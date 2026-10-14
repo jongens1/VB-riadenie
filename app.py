@@ -20,6 +20,9 @@ COLORS = {
     'muted': '#9CB3CD', 'border': '#27415F',
 }
 
+# Invalidate session results produced by the former target-capped allocation rule.
+PUTAWAY_PLAN_VERSION = 'capacity-trigger-v2'
+
 
 def inject_custom_css():
     import streamlit as st
@@ -167,6 +170,28 @@ def _collapse_diagnostics():
 def main():
     import streamlit as st
 
+    @st.cache_resource
+    def current_warehouse_rules(source_digest):
+        # Streamlit can rerun app.py while retaining an older imported warehouse.
+        # Reload once per source revision; serialize reloads across sessions.
+        import importlib
+        import threading
+        import warehouse
+        lock = warehouse.__dict__.setdefault('_vb_reload_lock', threading.RLock())
+        with lock:
+            return importlib.reload(warehouse)
+
+    rules_path = Path(__file__).with_name('warehouse.py')
+    rules_digest = hashlib.sha256(rules_path.read_bytes()).hexdigest()
+    rules = current_warehouse_rules(rules_digest)
+    resolve_columns = rules.resolve_columns
+    normalize_key = rules.normalize_key
+    validate_input_data = rules.validate_input_data
+    exclude_unknown_locations = rules.exclude_unknown_locations
+    get_product_info = rules.get_product_info
+    plan_putaway = rules.plan_putaway
+    analyze_defragmentation = rules.analyze_defragmentation
+
     st.set_page_config(page_title='VB · Riadenie skladu', page_icon='📦', layout='wide')
     inject_custom_css()
     render_header()
@@ -217,7 +242,7 @@ def main():
     with putaway_tab:
         with st.container(border=True):
             st.subheader('Naplánovať príjem')
-            st.caption('Cieľová zásoba spúšťa použitie primáru; vybraná lokácia sa plní do voľnej kapacity.')
+            st.caption('Cieľová zásoba rozhoduje, či sa použije primár. Vybraná primárna lokácia sa plní do voľnej kapacity.')
             pc = resolve_columns(products)
             keys = products[pc['sku']].map(normalize_key).tolist()
             names = dict(zip(keys, products[pc['name']].astype(str))) if pc['name'] else {}
@@ -227,7 +252,7 @@ def main():
             info = get_product_info(sku, products, stock)
             st.caption(f'Predaj: {info.monthly_sales:g} ks/mesiac · Rozmery: {info.width:g} × {info.depth:g} × {info.height:g} cm · Stohovanie: {info.stackability}')
             clicked = st.button('Vypočítať plán príjmu', type='primary', on_click=_collapse_diagnostics)
-        signature = (source_id, sku, quantity, days, mixed)
+        signature = (source_id, sku, quantity, days, mixed, PUTAWAY_PLAN_VERSION, rules_digest)
         if clicked:
             with st.spinner('Pripravujem plán príjmu…'):
                 allocations, summary = plan_putaway(sku, quantity, days, stock, locations, products, mixed)
@@ -269,7 +294,7 @@ def main():
             st.subheader('Konsolidácia rozdrobených SKU')
             st.caption('Zlúčenie celého SKU do jednej existujúcej lokácie podľa kapacity a pravidiel miešania.')
             clicked = st.button('Analyzovať možnosti presunov', type='primary', on_click=_collapse_diagnostics)
-        signature = (source_id, mixed)
+        signature = (source_id, mixed, rules_digest)
         if clicked:
             with st.spinner('Analyzujem skladové lokácie…'):
                 moves, freed, fragmented = analyze_defragmentation(stock, locations, products, mixed)

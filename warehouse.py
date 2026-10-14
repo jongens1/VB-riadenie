@@ -256,6 +256,7 @@ def plan_putaway(selected_product, total_qty_to_store, days_target,
             break
         if target is None and (len(existing) > 1 or (existing and location not in existing)):
             continue
+        # Target need controls whether another location is used, never its quantity.
         qty_to_place = min(remaining, free)
         allocations.append(dict(type='PRIMARY', location=location, quantity=qty_to_place,
                                 free_before=free, capacity=warehouse.capacity(location, sku),
