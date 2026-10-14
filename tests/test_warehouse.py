@@ -15,7 +15,7 @@ def fixture(rows=(), sales=10):
 
 
 class PlanningTests(unittest.TestCase):
-    def test_target_is_not_exceeded_and_remainder_swaps(self):
+    def test_replenishes_existing_location_to_capacity_and_swaps_remainder(self):
         data = fixture([('A', 'L1', 8)])
         plan, summary = plan_putaway('A', 20, 30, *data)
         self.assertEqual(summary['needed_for_target'], 2)
@@ -25,7 +25,9 @@ class PlanningTests(unittest.TestCase):
     def test_target_across_multiple_locations(self):
         data = fixture(sales=15)
         plan, _ = plan_putaway('A', 30, 30, *data)
-        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [10, 5])
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [10, 10])
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 10)
+        self.assertNotIn('L3', plan.location.tolist())
         self.assertEqual(plan.quantity.sum(), 30)
 
     def test_already_above_target_all_swaps(self):
@@ -36,7 +38,52 @@ class PlanningTests(unittest.TestCase):
     def test_zero_sales_one_location(self):
         plan, _ = plan_putaway('A', 25, 30, *fixture(sales=0))
         self.assertEqual(len(plan[plan.type == 'PRIMARY']), 1)
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].sum(), 10)
         self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 15)
+
+    def capacity_fixture(self, rows=(), sales=19):
+        stock, locations, products = fixture(rows, sales=sales)
+        locations['Šírka'] = 600  # SKU A: 60 units per location.
+        return stock, locations, products
+
+    def test_example_a_empty_location_fills_60_and_swaps_10(self):
+        stock, locations, products = self.capacity_fixture([('A', 'L1', 5)])
+        locations.loc[0, 'Šírka'] = 50  # Existing stock is on a full 5-unit location.
+        plan, summary = plan_putaway('A', 70, 30, stock, locations, products)
+        self.assertEqual((summary['current_stock'], summary['target_stock_needed'], summary['needed_for_target']), (5, 19, 14))
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [60])
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'location'].tolist(), ['L2'])
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 10)
+        self.assertNotIn('L3', plan.location.tolist())
+        self.assertIn('cieľová zásoba je pokrytá', plan.loc[plan.type == 'SWAP', 'reason'].iloc[0])
+
+    def test_example_b_same_sku_fills_55_and_swaps_15(self):
+        plan, _ = plan_putaway('A', 70, 30, *self.capacity_fixture([('A', 'L1', 5)]))
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'location'].tolist(), ['L1'])
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [55])
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 15)
+
+    def test_example_c_small_inbound_all_goes_to_primary(self):
+        plan, _ = plan_putaway('A', 8, 30, *self.capacity_fixture([('A', 'L1', 5)]))
+        self.assertEqual(plan.type.tolist(), ['PRIMARY'])
+        self.assertEqual(plan.quantity.tolist(), [8])
+
+    def test_example_d_covered_target_all_70_goes_to_swap(self):
+        plan, summary = plan_putaway('A', 70, 30, *self.capacity_fixture([('A', 'L1', 25)]))
+        self.assertEqual(summary['needed_for_target'], 0)
+        self.assertEqual(plan.type.tolist(), ['SWAP'])
+        self.assertEqual(plan.quantity.tolist(), [70])
+
+    def test_example_e_two_full_locations_overshoot_target(self):
+        plan, _ = plan_putaway('A', 200, 30, *self.capacity_fixture(sales=100))
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [60, 60])
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'location'].tolist(), ['L1', 'L2'])
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 80)
+
+    def test_zero_sales_fills_only_one_60_unit_location(self):
+        plan, _ = plan_putaway('A', 200, 30, *self.capacity_fixture(sales=0))
+        self.assertEqual(plan.loc[plan.type == 'PRIMARY', 'quantity'].tolist(), [60])
+        self.assertEqual(plan.loc[plan.type == 'SWAP', 'quantity'].sum(), 140)
 
     def test_zero_sales_existing_full_does_not_open_new_location(self):
         plan, _ = plan_putaway('A', 5, 30, *fixture([('A', 'L1', 10)], sales=0))

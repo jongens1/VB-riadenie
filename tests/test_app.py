@@ -23,7 +23,8 @@ class AppTests(unittest.TestCase):
         app.button[0].click().run()
         self.assertEqual(len(app.exception), 0)
         metrics = self.metrics(app)
-        self.assertEqual([metrics[k] for k in ('Príjem spolu', 'Do primáru', 'Do SWAPu', 'Primárne lokácie')], ['20 ks', '7 ks', '13 ks', '1'])
+        self.assertEqual([metrics[k] for k in ('Príjem spolu', 'Do primáru', 'Do SWAPu', 'Primárne lokácie')], ['20 ks', '9 ks', '11 ks', '1'])
+        self.assertTrue(any('Primárna alokácia môže prekročiť cieľ' in c.value for c in app.caption))
         self.assertTrue(any('Aktuálna zásoba: 3 ks · Cieľ primáru: 10 ks' in c.value for c in app.caption))
         self.assertEqual(app.dataframe[0].value['Počet ks'].sum(), 20)
         app.button[1].click().run()
@@ -48,7 +49,7 @@ class AppTests(unittest.TestCase):
         app.button[0].click().run()
         self.assertEqual(len(app.exception), 0)
         metrics = self.metrics(app)
-        self.assertEqual([metrics[k] for k in ('Do primáru', 'Do SWAPu')], ['7 ks', '13 ks'])
+        self.assertEqual([metrics[k] for k in ('Do primáru', 'Do SWAPu')], ['9 ks', '11 ks'])
         self.assertFalse(app.checkbox[1].value)
 
     def test_results_survive_diagnostics_toggle_and_rerun(self):
@@ -56,9 +57,9 @@ class AppTests(unittest.TestCase):
         app.button[0].click().run()
         app.checkbox[1].check().run()
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(self.metrics(app)['Do primáru'], '7 ks')
+        self.assertEqual(self.metrics(app)['Do primáru'], '9 ks')
         app.checkbox[1].uncheck().run()
-        self.assertEqual(self.metrics(app)['Do SWAPu'], '13 ks')
+        self.assertEqual(self.metrics(app)['Do SWAPu'], '11 ks')
         app.run()
         self.assertFalse(app.checkbox[1].value)
         self.assertEqual(app.dataframe[0].value['Počet ks'].sum(), 20)
@@ -69,7 +70,7 @@ class AppTests(unittest.TestCase):
         app.number_input[0].set_value(30).run()
         self.assertNotIn('Do primáru', self.metrics(app))
         app.button[0].click().run()
-        self.assertEqual(self.metrics(app)['Do SWAPu'], '23 ks')
+        self.assertEqual(self.metrics(app)['Do SWAPu'], '21 ks')
 
     def test_stale_defrag_result_is_removed_when_rules_change(self):
         app = self.app()

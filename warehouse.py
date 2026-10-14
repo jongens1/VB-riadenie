@@ -225,6 +225,11 @@ class Warehouse:
 
 def plan_putaway(selected_product, total_qty_to_store, days_target,
                  df_sku_aktual, df_location, df_produkty, allow_mixed_sku=False):
+    """Target stock triggers replenishment; each selected location fills to capacity.
+
+    Once the target is met (including overshoot), no further location is used.
+    Zero-sales products retain their one-primary-location rule.
+    """
     if isinstance(total_qty_to_store, bool) or not math.isfinite(float(total_qty_to_store)) or total_qty_to_store < 1 or total_qty_to_store % 1:
         raise ValueError('Príjem musí byť kladný celý počet kusov.')
     if not math.isfinite(float(days_target)) or days_target <= 0:
@@ -247,26 +252,36 @@ def plan_putaway(selected_product, total_qty_to_store, days_target,
     remaining, remaining_target_need = int(total_qty_to_store), need
     allocations = []
     for group, _, location, free in candidates:
-        if remaining == 0 or (remaining_target_need is not None and remaining_target_need == 0):
+        if remaining == 0 or (remaining_target_need is not None and remaining_target_need <= 0):
             break
         if target is None and (len(existing) > 1 or (existing and location not in existing)):
             continue
-        qty_to_place = min(remaining, free, remaining_target_need) if target is not None else min(remaining, free)
+        qty_to_place = min(remaining, free)
         allocations.append(dict(type='PRIMARY', location=location, quantity=qty_to_place,
                                 free_before=free, capacity=warehouse.capacity(location, sku),
-                                reason=('Konsolidácia rovnakého SKU', 'Prázdna lokácia', 'Povolené miešanie SKU')[group]))
+                                reason='Doplnenie primárnej lokácie do kapacity – ' +
+                                ('rovnaké SKU', 'prázdna lokácia', 'povolené miešanie SKU')[group]))
         remaining -= qty_to_place
         if target is None:
             break
         remaining_target_need -= qty_to_place
     if remaining:
-        reason = 'Limit jednej primárnej lokácie' if target is None else ('Cieľová zásoba je pokrytá' if remaining_target_need == 0 else 'Nedostatok vhodnej primárnej kapacity')
+        if target is None:
+            reason = ('Zvyšok príjmu po naplnení jednej primárnej lokácie'
+                      if allocations else 'Nie je dostupná vhodná kapacita v rámci limitu jednej primárnej lokácie')
+        elif need == 0:
+            reason = 'Cieľová zásoba bola pokrytá pred príjmom'
+        elif remaining_target_need <= 0:
+            reason = 'Zvyšok príjmu po naplnení primárnych lokácií; cieľová zásoba je pokrytá'
+        else:
+            reason = 'Nedostatok vhodnej primárnej kapacity'
         allocations.append(dict(type='SWAP', location='PALETOVÁ ZÓNA / SWAP', quantity=remaining,
                                 free_before=None, capacity=None, reason=reason))
     warnings = list(warehouse.warnings) + list(info.warnings)
     if target is None and len(existing) > 1:
         warnings.append('Bezpredajné SKU už obsadzuje viac než jednu lokáciu. Príjem ide do SWAPu; najprv konsolidujte zásobu.')
-    summary = dict(monthly_sales=info.monthly_sales, current_stock=current,
+    summary = dict(monthly_sales=info.monthly_sales, daily_sales=info.monthly_sales / 30,
+                   current_stock=current,
                    target_stock_needed=target, needed_for_target=need, warnings=list(dict.fromkeys(warnings)))
     return pd.DataFrame(allocations, columns=ALLOCATION_COLUMNS), summary
 
