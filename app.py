@@ -13,8 +13,16 @@ st.set_page_config(
 st.title("🏗️ Plánovač Riadenia Zaskladňovania (Veľká Biela)")
 st.caption("Interný nástroj pre optimalizáciu ukladania produktov na lokácie")
 
-# Názov predvoleného súboru v GitHub repozitári
+# Názov predvoleného súboru
 DEFAULT_EXCEL_PATH = "data.xlsx"
+
+# --- HELPER PRE INTEGRITU STĹPCOV ---
+def get_column_name(df, candidate_names):
+    """Vráti prvý existujúci názov stĺpca zo zoznamu kandidátov."""
+    for name in candidate_names:
+        if name in df.columns:
+            return name
+    return None
 
 # --- NAHRATIE A SPRACOVANIE DÁT ---
 @st.cache_data
@@ -22,8 +30,7 @@ def load_data_from_excel(file_path_or_buffer):
     excel_data = pd.ExcelFile(file_path_or_buffer)
     sheet_names = excel_data.sheet_names
     
-    # Dynamická kontrola názvu hárku pre lokácie
-    loc_sheet = 'Locations' if 'Locations' in sheet_names else 'Location'
+    loc_sheet = 'Locations' if 'Locations' in sheet_names else ('Location' if 'Location' in sheet_names else sheet_names[1])
     
     df_sku_aktual = pd.read_excel(excel_data, sheet_name='SKU aktuál')
     df_location = pd.read_excel(excel_data, sheet_name=loc_sheet)
@@ -35,30 +42,42 @@ uploaded_file = st.sidebar.file_uploader("Nahraj vlastný Excel (voliteľné)", 
 
 df_sku_aktual, df_location, df_produkty = None, None, None
 
-# Načítanie dát
 if uploaded_file is not None:
     try:
         df_sku_aktual, df_location, df_produkty = load_data_from_excel(uploaded_file)
-        st.sidebar.success("✅ Načítaný nový nahraný súbor!")
+        st.sidebar.success("✅ Načítaný ručne nahraný súbor!")
     except Exception as e:
         st.sidebar.error(f"Chyba pri čítaní nahraného súboru: {e}")
         st.stop()
 elif os.path.exists(DEFAULT_EXCEL_PATH):
     try:
         df_sku_aktual, df_location, df_produkty = load_data_from_excel(DEFAULT_EXCEL_PATH)
-        st.sidebar.info("ℹ️ Používajú sa predvolené dáta zo súboru `data.xlsx`")
+        st.sidebar.info("ℹ️ Používajú sa dáta zo súboru `data.xlsx`")
     except Exception as e:
         st.sidebar.error(f"Chyba pri čítaní `data.xlsx`: {e}")
         st.stop()
 else:
-    st.error(f"❌ Súbor `{DEFAULT_EXCEL_PATH}` sa nenašiel v repozitári a nebol nahraný žiaden súbor.")
+    st.error(f"❌ Súbor `{DEFAULT_EXCEL_PATH}` sa nenašiel v repozitári.")
     st.stop()
 
 
 # --- LOGIKA ZASKLADŇOVANIA ---
 def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_produkty):
-    # 1. Parameter produktu z hárku Produkty
-    prod_row = df_produkty[df_produkty['Produkt'] == selected_produkt]
+    # 1. Identifikácia stĺpcov v 'SKU aktuál' (zohľadňuje Množstvo vs Množství)
+    qty_col_sku = get_column_name(df_sku_aktual, ['Množstvo', 'Množství', 'Qty', 'Počet'])
+    loc_col_sku = get_column_name(df_sku_aktual, ['Lokace', 'Lokácia', 'Location', 'Názov lokácie'])
+    prod_col_sku = get_column_name(df_sku_aktual, ['Produkt', 'SKU', 'Product'])
+
+    if not qty_col_sku or not loc_col_sku:
+        return None, f"V hárku 'SKU aktuál' sa nenašli stĺpce pre lokáciu alebo množstvo."
+
+    # 2. Identifikácia stĺpca v 'Locations'
+    loc_col_loc = get_column_name(df_location, ['Názov lokácie', 'Lokace', 'Lokácia', 'Location']) or df_location.columns[0]
+
+    # 3. Získanie parametrov produktu z 'Produkty'
+    prod_col_prod = get_column_name(df_produkty, ['Produkt', 'SKU', 'Product'])
+    prod_row = df_produkty[df_produkty[prod_col_prod] == selected_produkt]
+    
     if prod_row.empty:
         return None, "Produkt nebol nájdený v hárku 'Produkty'."
     
@@ -68,39 +87,33 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
     if pd.isna(stohovatelnost) or stohovatelnost < 1:
         stohovatelnost = 1
 
-    # 2. Výpočet potrieb pre stohovanie
-    potrebne_stlpce = math.ceil(qty / stohovatelnost)
-    
-    # 3. Zistenie obsadenosti lokácií z 'SKU aktuál'
-    obsadenost_lokacii = df_sku_aktual.groupby('Lokace').agg({
-        'Množství': 'sum',
-        'Produkt': list
+    # 4. Agregácia obsadenosti lokácií
+    obsadenost_lokacii = df_sku_aktual.groupby(loc_col_sku).agg({
+        qty_col_sku: 'sum',
+        prod_col_sku: list
     }).reset_index()
 
-    # Identifikácia názvu stĺpca pre lokáciu v tabuľke lokácií (Názov lokácie vs Lokácie vs Location)
-    loc_col = 'Názov lokácie' if 'Názov lokácie' in df_location.columns else df_location.columns[0]
-
-    # 4. Spojenie lokácií s ich aktuálnym stavom
+    # 5. Spojenie lokácií s ich stavom
     df_loc_merged = pd.merge(
         df_location, 
         obsadenost_lokacii, 
-        left_on=loc_col, 
-        right_on='Lokace', 
+        left_on=loc_col_loc, 
+        right_on=loc_col_sku, 
         how='left'
     )
-    df_loc_merged['Množství'] = df_loc_merged['Množství'].fillna(0)
+    df_loc_merged[qty_col_sku] = df_loc_merged[qty_col_sku].fillna(0)
     
-    # 5. Pravidlo KONSOLIDÁCIE
+    # 6. Pravidlo KONSOLIDÁCIE
     def has_same_sku(sku_list):
         if isinstance(sku_list, list):
             return selected_produkt in sku_list
         return False
         
-    df_loc_merged['Rovnake_SKU_Pritomne'] = df_loc_merged['Produkt'].apply(has_same_sku)
+    df_loc_merged['Rovnake_SKU_Pritomne'] = df_loc_merged[prod_col_sku].apply(has_same_sku)
 
-    # 6. Prioritizácia kandidátov (1. Konsolidácia, 2. Najmenej obsadené)
+    # 7. Zotriedenie kandidátov (Konsolidácia -> Najmenej obsadená lokácia)
     candidates = df_loc_merged.sort_values(
-        by=['Rovnake_SKU_Pritomne', 'Množství'], 
+        by=['Rovnake_SKU_Pritomne', qty_col_sku], 
         ascending=[False, True]
     )
 
@@ -115,7 +128,7 @@ def find_best_location(selected_produkt, qty, df_sku_aktual, df_location, df_pro
     else:
         reason += "dostupnej voľnej kapacity."
 
-    return best_loc[loc_col], reason
+    return best_loc[loc_col_loc], reason
 
 
 # --- UŽÍVATEĽSKÉ ROZHRANIE ---
@@ -126,22 +139,30 @@ with tab1:
     
     col_input1, col_input2 = st.columns(2)
     
+    prod_col_prod = get_column_name(df_produkty, ['Produkt', 'SKU', 'Product'])
+    
     with col_input1:
-        seznam_produktov = df_produkty['Produkt'].dropna().unique().tolist()
+        seznam_produktov = df_produkty[prod_col_prod].dropna().unique().tolist()
         selected_produkt = st.selectbox("Vyber Produkt (Kód)", options=seznam_produktov)
         
     with col_input2:
         qty_input = st.number_input("Počet kusov na zaskladnenie", min_value=1, value=1, step=1)
 
     if selected_produkt:
-        prod_info = df_produkty[df_produkty['Produkt'] == selected_produkt].iloc[0]
+        prod_info = df_produkty[df_produkty[prod_col_prod] == selected_produkt].iloc[0]
         
         st.markdown("---")
         col_d1, col_d2, col_d3, col_d4 = st.columns(4)
         col_d1.metric("Názov produktu", str(prod_info.get('Název produktu', 'N/A')))
-        col_d2.metric("Predaje / mesiac", int(prod_info.get('Prodeje měsíc', 0)) if not pd.isna(prod_info.get('Prodeje měsíc')) else 0)
-        col_d3.metric("Stohovateľnosť", int(prod_info.get('Stohovateľnosť', 1)) if not pd.isna(prod_info.get('Stohovateľnosť')) else 1)
-        col_d4.metric("GeoSize", str(prod_info.get('Rozměr produktu (GeoSize)', 'N/A')))
+        
+        prodeje_val = prod_info.get('Prodeje měsíc', 0)
+        col_d2.metric("Predaje / mesiac", int(prodeje_val) if not pd.isna(prodeje_val) else 0)
+        
+        stoh_val = prod_info.get('Stohovateľnosť', 1)
+        col_d3.metric("Stohovateľnosť", int(stoh_val) if not pd.isna(stoh_val) else 1)
+        
+        geosize_val = prod_info.get('Rozměr produktu (GeoSize)', prod_info.get('Geo Size', 'N/A'))
+        col_d4.metric("GeoSize", str(geosize_val))
         st.markdown("---")
 
     if st.button("🚀 Vypočítať optimálnu lokáciu", type="primary"):
@@ -161,7 +182,7 @@ with tab1:
 
 with tab2:
     st.subheader("Náhľad na dáta v systéme")
-    subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations", "Produkty"])
+    subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations / Location", "Produkty"])
     
     with subtab1:
         st.dataframe(df_sku_aktual, use_container_width=True)
