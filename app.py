@@ -77,6 +77,7 @@ def calculate_location_capacity(loc_w, loc_d, loc_h, prod_w, prod_d, prod_h, sta
     if max_stack_by_height == 0:
         return 0
     
+    # Prísne uplatnenie stohovateľnosti (menšie z hodnôt: Stohovateľnosť z karty vs Výška lokácie)
     eff_stackability = min(int(stackability), max_stack_by_height)
     
     fit_orient1 = int(loc_w // prod_w) * int(loc_d // prod_d)
@@ -86,7 +87,7 @@ def calculate_location_capacity(loc_w, loc_d, loc_h, prod_w, prod_d, prod_h, sta
     return max_floor_units * eff_stackability
 
 
-# --- LOGIKA ZASKLADŇOVANIA (S NOVOSTNOU / NULOVOU PREDAJNOSŤOU) ---
+# --- LOGIKA ZASKLADŇOVANIA ---
 def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_target, df_sku_aktual, df_location, df_produkty):
     qty_col_sku = get_column_name(df_sku_aktual, ['Množstvo', 'Množství', 'Qty', 'Počet'])
     loc_col_sku = get_column_name(df_sku_aktual, ['Lokace', 'Lokácia', 'Location', 'Názov lokácie'])
@@ -104,11 +105,20 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
         return [], {}, "Produkt nebol nájdený v hárku 'Produkty'."
     
     prod_row = prod_row.iloc[0]
-    stohovatelnost = prod_row.get('Stohovateľnosť', 1)
-    if pd.isna(stohovatelnost) or stohovatelnost < 1:
+    
+    # 🔍 BEZPEČNÉ ZÍSKANIE STOHOVATEĽNOSTI Z HÁRKU PRODUKTY
+    stoh_col = get_column_name(df_produkty, ['Stohovatelnost', 'Stohovateľnosť', 'Stackability', 'Stohovanie'])
+    stoh_raw = prod_row.get(stoh_col, 1) if stoh_col else 1
+    
+    try:
+        if pd.isna(stoh_raw) or float(stoh_raw) < 1:
+            stohovatelnost = 1
+        else:
+            stohovatelnost = int(float(stoh_raw))
+    except (ValueError, TypeError):
         stohovatelnost = 1
 
-    # Zistenie predajnosti
+    # Predajnosť
     monthly_sales = prod_row.get('Prodeje měsíc', 0)
     if pd.isna(monthly_sales) or monthly_sales < 0:
         monthly_sales = 0
@@ -124,10 +134,8 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     else:
         prod_h, prod_w, prod_d = 85, 60, 60
 
-    # Aktuálna zásoba v sklade
     current_stock = sku_rows[qty_col_sku].sum() if not sku_rows.empty else 0
 
-    # Agregácia obsadenosti
     obsadenost_lokacii = df_sku_aktual.groupby(loc_col_sku).agg({
         qty_col_sku: 'sum',
         prod_col_sku: list
@@ -142,6 +150,7 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     )
     df_loc_merged[qty_col_sku] = df_loc_merged[qty_col_sku].fillna(0)
     
+    # Výpočet kapacity s načítanou stohovateľnosťou
     def calc_cap(row):
         l_w = row.get(loc_w_col, 120)
         l_d = row.get(loc_d_col, 80)
@@ -173,14 +182,11 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
         target_stock_needed = "1 Lokácia (Nové SKU)"
         needed_for_target = "Max 1 Lokácia"
         
-        # Kontrola, či už produkt leží na sklade a či má existujúca lokácia voľné miesto
         has_free_consolidated_loc = any(candidates['Rovnake_SKU_Pritomne']) if not candidates.empty else False
         
-        # Ak už tovar leží na sklade a nemá voľné miesto na pôvodnej lokácii -> všetko novopríchodzie ide do SWAP
         if current_stock > 0 and not has_free_consolidated_loc:
-            pass # 0 ks do primárnej lokácie
+            pass
         elif not candidates.empty:
-            # Alokujeme PRESNE 1 primárnu lokáciu (do jej max kapacity)
             row = candidates.iloc[0]
             loc_free_cap = int(row['Volna_Kapacita'])
             qty_to_place = min(remaining_inbound, loc_free_cap)
@@ -249,7 +255,8 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
         'target_days': days_target,
         'target_stock_needed': target_stock_needed,
         'current_stock': int(current_stock),
-        'needed_for_target': needed_for_target
+        'needed_for_target': needed_for_target,
+        'stohovatelnost_used': stohovatelnost
     }
 
     return allocations, summary_info, "Výpočet úspešne dokončený."
@@ -274,6 +281,13 @@ with tab1:
     if selected_produkt:
         prod_info = df_produkty[df_produkty[prod_col_prod] == selected_produkt].iloc[0]
         
+        stoh_col = get_column_name(df_produkty, ['Stohovatelnost', 'Stohovateľnosť', 'Stackability', 'Stohovanie'])
+        stoh_raw = prod_info.get(stoh_col, 1) if stoh_col else 1
+        try:
+            stoh_display = int(float(stoh_raw)) if (not pd.isna(stoh_raw) and float(stoh_raw) >= 1) else 1
+        except (ValueError, TypeError):
+            stoh_display = 1
+
         st.markdown("---")
         col_d1, col_d2, col_d3, col_d4 = st.columns(4)
         col_d1.metric("Názov produktu", str(prod_info.get('Název produktu', 'N/A')))
@@ -282,8 +296,7 @@ with tab1:
         sales_display = int(prodeje_val) if not pd.isna(prodeje_val) else 0
         col_d2.metric("Predaje / mesiac", f"{sales_display} ks" if sales_display > 0 else "0 ks (NOVÝ/BEZ PREDAJOV)")
         
-        stoh_val = prod_info.get('Stohovateľnosť', 1)
-        col_d3.metric("Stohovateľnosť", int(stoh_val) if not pd.isna(stoh_val) else 1)
+        col_d3.metric("Stohovateľnosť", f"{stoh_display} ks nad sebou")
         
         geosize_val = prod_info.get('Rozměr produktu (GeoSize)', prod_info.get('Geo Size', 'N/A'))
         col_d4.metric("GeoSize", str(geosize_val))
@@ -306,7 +319,7 @@ with tab1:
         if summary['is_zero_sales']:
             col_s2.metric("Režim produktu", "🆕 NOVÝ / BEZ PREDAJOV")
             col_s3.metric("Aktuálne na sklade", f"{summary['current_stock']} ks")
-            col_s4.metric("Pravidlo alokácie", "Max 1 primárna lokácia")
+            col_s4.metric("Pravidlo alokácie", f"Max 1 lokácia (Stohovateľnosť: {summary['stohovatelnost_used']})")
         else:
             col_s2.metric(f"Cieľová zásoba ({target_days} dní)", f"{summary['target_stock_needed']} ks")
             col_s3.metric("Aktuálne na sklade", f"{summary['current_stock']} ks")
