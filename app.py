@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("🏗️ Plánovač Riadenia Zaskladňovania (Veľká Biela)")
-st.caption("Aplikácia pre riadenie primárnych zásob, nových produktov a SWAPu")
+st.caption("Aplikácia pre riadenie primárnych zásob, SWAPu a defragmentáciu skladu")
 
 DEFAULT_EXCEL_PATH = "data.xlsx"
 
@@ -77,7 +77,6 @@ def calculate_location_capacity(loc_w, loc_d, loc_h, prod_w, prod_d, prod_h, sta
     if max_stack_by_height == 0:
         return 0
     
-    # Prísne uplatnenie stohovateľnosti (menšie z hodnôt: Stohovateľnosť z karty vs Výška lokácie)
     eff_stackability = min(int(stackability), max_stack_by_height)
     
     fit_orient1 = int(loc_w // prod_w) * int(loc_d // prod_d)
@@ -106,26 +105,19 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     
     prod_row = prod_row.iloc[0]
     
-    # 🔍 BEZPEČNÉ ZÍSKANIE STOHOVATEĽNOSTI Z HÁRKU PRODUKTY
     stoh_col = get_column_name(df_produkty, ['Stohovatelnost', 'Stohovateľnosť', 'Stackability', 'Stohovanie'])
     stoh_raw = prod_row.get(stoh_col, 1) if stoh_col else 1
-    
     try:
-        if pd.isna(stoh_raw) or float(stoh_raw) < 1:
-            stohovatelnost = 1
-        else:
-            stohovatelnost = int(float(stoh_raw))
+        stohovatelnost = int(float(stoh_raw)) if (not pd.isna(stoh_raw) and float(stoh_raw) >= 1) else 1
     except (ValueError, TypeError):
         stohovatelnost = 1
 
-    # Predajnosť
     monthly_sales = prod_row.get('Prodeje měsíc', 0)
     if pd.isna(monthly_sales) or monthly_sales < 0:
         monthly_sales = 0
         
     is_zero_sales = (monthly_sales == 0)
 
-    # Rozmery
     sku_rows = df_sku_aktual[df_sku_aktual[prod_col_sku] == selected_produkt]
     if not sku_rows.empty:
         prod_h = sku_rows.get('Výška', pd.Series([85])).iloc[0]
@@ -150,7 +142,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     )
     df_loc_merged[qty_col_sku] = df_loc_merged[qty_col_sku].fillna(0)
     
-    # Výpočet kapacity s načítanou stohovateľnosťou
     def calc_cap(row):
         l_w = row.get(loc_w_col, 120)
         l_d = row.get(loc_d_col, 80)
@@ -177,7 +168,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     allocations = []
     remaining_inbound = total_qty_to_store
 
-    # --- SCHÉMA A: NULOVÁ PREDAJNOSŤ / NOVÝ PRODUKT ---
     if is_zero_sales:
         target_stock_needed = "1 Lokácia (Nové SKU)"
         needed_for_target = "Max 1 Lokácia"
@@ -206,7 +196,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
 
             remaining_inbound -= qty_to_place
 
-    # --- SCHÉMA B: ŠTANDARDNÝ PRODUKT S PREDAJMI ---
     else:
         daily_sales = monthly_sales / 30.0
         target_stock_needed = math.ceil(daily_sales * days_target)
@@ -236,7 +225,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
             remaining_inbound -= qty_to_place
             remaining_target_need = max(0, remaining_target_need - qty_to_place)
 
-    # --- VŠETKO OSTATNÉ IDE DO SWAP ---
     if remaining_inbound > 0:
         swap_reason = "Nadzásoba pre nové/bezpredajné SKU (nad rámec 1 primárnej lokácie)" if is_zero_sales else f"Nadzásoba presahujúca cieľovú zásobu na {days_target} dní"
         
@@ -262,8 +250,89 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     return allocations, summary_info, "Výpočet úspešne dokončený."
 
 
+# --- LOGIKA DEFRAGMENTÁCIE SKLADU ---
+def analyze_defragmentation(df_sku_aktual, df_location, df_produkty):
+    qty_col_sku = get_column_name(df_sku_aktual, ['Množstvo', 'Množství', 'Qty', 'Počet'])
+    loc_col_sku = get_column_name(df_sku_aktual, ['Lokace', 'Lokácia', 'Location', 'Názov lokácie'])
+    prod_col_sku = get_column_name(df_sku_aktual, ['Produkt', 'SKU', 'Product'])
+
+    loc_col_loc = get_column_name(df_location, ['Názov lokácie', 'Lokace', 'Lokácia', 'Location']) or df_location.columns[0]
+    loc_w_col = get_column_name(df_location, ['Šířka (cm)', 'Šírka (cm)', 'Šírka', 'Šířka'])
+    loc_d_col = get_column_name(df_location, ['Hloubka (cm)', 'Hĺbka (cm)', 'Hloubka', 'Hĺbka'])
+    loc_h_col = get_column_name(df_location, ['Výška (cm)', 'Výška'])
+
+    prod_col_prod = get_column_name(df_produkty, ['Produkt', 'SKU', 'Product'])
+
+    # 1. Zistiť produkty, ktoré ležia na viac ako 1 lokácii
+    sku_loc_counts = df_sku_aktual.groupby(prod_col_sku)[loc_col_sku].nunique()
+    multi_loc_skus = sku_loc_counts[sku_loc_counts > 1].index.tolist()
+
+    moves = []
+    freed_locations_count = 0
+
+    for sku in multi_loc_skus:
+        sku_rows = df_sku_aktual[df_sku_aktual[prod_col_sku] == sku]
+        total_qty = sku_rows[qty_col_sku].sum()
+
+        # Názov produktu
+        prod_info = df_produkty[df_produkty[prod_col_prod] == sku]
+        prod_name = prod_info['Název produktu'].iloc[0] if not prod_info.empty and 'Název produktu' in prod_info.columns else str(sku)
+
+        # Stohovateľnosť a rozmery
+        stoh_col = get_column_name(df_produkty, ['Stohovatelnost', 'Stohovateľnosť', 'Stackability'])
+        stoh_raw = prod_info[stoh_col].iloc[0] if (not prod_info.empty and stoh_col) else 1
+        try:
+            stohovatelnost = int(float(stoh_raw)) if (not pd.isna(stoh_raw) and float(stoh_raw) >= 1) else 1
+        except (ValueError, TypeError):
+            stohovatelnost = 1
+
+        prod_h = sku_rows.get('Výška', pd.Series([85])).iloc[0]
+        prod_w = sku_rows.get('Šírka', pd.Series([60])).iloc[0]
+        prod_d = sku_rows.get('Hloubka', pd.Series([60])).iloc[0]
+
+        # Súčasné lokácie pre toto SKU
+        current_locs = sku_rows[[loc_col_sku, qty_col_sku]].copy()
+
+        # Vypočítame kapacitu každej z lokácií, kde tovar momentálne leží
+        loc_capacities = {}
+        for l_id in current_locs[loc_col_sku]:
+            l_row = df_location[df_location[loc_col_loc] == l_id]
+            if not l_row.empty:
+                l_row = l_row.iloc[0]
+                cap = calculate_location_capacity(
+                    l_row.get(loc_w_col, 120), l_row.get(loc_d_col, 80), l_row.get(loc_h_col, 200),
+                    prod_w, prod_d, prod_h, stohovatelnost
+                )
+            else:
+                cap = 10
+            loc_capacities[l_id] = cap
+
+        current_locs['Max_Cap'] = current_locs[loc_col_sku].map(loc_capacities)
+
+        # SKÚŠKA: Vojde sa CELÉ celkové množstvo na JEDNU z existujúcich lokácií?
+        target_loc_row = current_locs[current_locs['Max_Cap'] >= total_qty]
+
+        if not target_loc_row.empty:
+            # DÁ SA KONSOLIDOVAŤ NA EXISTUJÚCU LOKÁCIU
+            target_loc = target_loc_row.sort_values(by=qty_col_sku, ascending=False).iloc[0][loc_col_sku]
+            sources = current_locs[current_locs[loc_col_sku] != target_loc]
+
+            for idx, s_row in sources.iterrows():
+                moves.append({
+                    'Produkt (SKU)': sku,
+                    'Názov produktu': prod_name,
+                    'Zdrojová lokácia (Odtiaľto)': s_row[loc_col_sku],
+                    'Presunúť (ks)': int(s_row[qty_col_sku]),
+                    'Cieľová lokácia (Sem)': target_loc,
+                    'Prínos / Výsledok': f"🧹 Úplné uvoľnenie lokácie {s_row[loc_col_sku]}"
+                })
+                freed_locations_count += 1
+
+    return pd.DataFrame(moves), freed_locations_count, len(multi_loc_skus)
+
+
 # --- UŽÍVATEĽSKÉ ROZHRANIE ---
-tab1, tab2 = st.tabs(["🎯 Plánovač Zaskladnenia & SWAP", "📊 Prehľad Dát"])
+tab1, tab2, tab3 = st.tabs(["🎯 Plánovač Zaskladnenia & SWAP", "🧹 Defragmentácia Skladu", "📊 Prehľad Dát"])
 
 with tab1:
     st.subheader("Vstup pre Príjem Tovaru")
@@ -334,6 +403,24 @@ with tab1:
         st.dataframe(alloc_df, use_container_width=True)
 
 with tab2:
+    st.subheader("🧹 Návrhy na Defragmentáciu & Zoskupenie Zásob")
+    st.caption("Systém vyhodnocuje rozdrobené produkty na viacero lokáciách a navrhuje interné presuny na uvoľnenie lokácií.")
+    
+    df_moves, freed_locs_cnt, multi_sku_cnt = analyze_defragmentation(df_sku_aktual, df_location, df_produkty)
+
+    col_m1, col_m2 = st.columns(2)
+    col_m1.metric("Počet rozdrobených SKU (vloženie na viac lokáciách)", multi_sku_cnt)
+    col_m2.metric("Možných uvoľnených lokácií", freed_locs_cnt, delta=f"+{freed_locs_cnt} voľných lokácií", delta_color="normal")
+
+    st.markdown("---")
+    
+    if not df_moves.empty:
+        st.subheader("📋 Zoznam odporúčaných skladových pohybov:")
+        st.dataframe(df_moves, use_container_width=True)
+    else:
+        st.success("🎉 Sklad je v optimálnom stave! Nenahlásené žiadne roztrieštené produkty, ktoré by sa dali jednoducho zlúčiť.")
+
+with tab3:
     st.subheader("Náhľad na dáta v systéme")
     subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations / Location", "Produkty"])
     
