@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("🏗️ Plánovač Riadenia Zaskladňovania (Veľká Biela)")
-st.caption("Aplikácia pre riadenie primárnych zásob a určovanie SWAP / Nadzásob")
+st.caption("Aplikácia pre riadenie primárnych zásob, nových produktov a SWAPu")
 
 DEFAULT_EXCEL_PATH = "data.xlsx"
 
@@ -38,14 +38,13 @@ def load_data_from_excel(file_path_or_buffer):
 st.sidebar.header("📁 Správa dát & Nastavenia")
 uploaded_file = st.sidebar.file_uploader("Nahraj vlastný Excel (voliteľné)", type=["xlsx", "xls"])
 
-# Nastaviteľný parameter pre cieľové dni zásoby
 target_days = st.sidebar.slider(
-    "⏱️ Cieľová zásoba na primárnej lokácii (dni)", 
+    "⏱️ Cieľová zásoba pre bežné produkty (dni)", 
     min_value=7, 
     max_value=90, 
     value=30, 
     step=1,
-    help="Koľko dní predaja chceme držať na primárnych/dostupných lokáciách."
+    help="Koľko dní predaja chceme držať na primárnych lokáciách pre štandardné produkty."
 )
 
 df_sku_aktual, df_location, df_produkty = None, None, None
@@ -87,7 +86,7 @@ def calculate_location_capacity(loc_w, loc_d, loc_h, prod_w, prod_d, prod_h, sta
     return max_floor_units * eff_stackability
 
 
-# --- LOGIKA ZASKLADŇOVANIA S PREDAJNOSŤOU A SWAP ---
+# --- LOGIKA ZASKLADŇOVANIA (S NOVOSTNOU / NULOVOU PREDAJNOSŤOU) ---
 def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_target, df_sku_aktual, df_location, df_produkty):
     qty_col_sku = get_column_name(df_sku_aktual, ['Množstvo', 'Množství', 'Qty', 'Počet'])
     loc_col_sku = get_column_name(df_sku_aktual, ['Lokace', 'Lokácia', 'Location', 'Názov lokácie'])
@@ -109,13 +108,12 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     if pd.isna(stohovatelnost) or stohovatelnost < 1:
         stohovatelnost = 1
 
-    # Predajnosť
+    # Zistenie predajnosti
     monthly_sales = prod_row.get('Prodeje měsíc', 0)
     if pd.isna(monthly_sales) or monthly_sales < 0:
         monthly_sales = 0
         
-    daily_sales = monthly_sales / 30.0
-    target_stock_needed = math.ceil(daily_sales * days_target)
+    is_zero_sales = (monthly_sales == 0)
 
     # Rozmery
     sku_rows = df_sku_aktual[df_sku_aktual[prod_col_sku] == selected_produkt]
@@ -128,9 +126,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
 
     # Aktuálna zásoba v sklade
     current_stock = sku_rows[qty_col_sku].sum() if not sku_rows.empty else 0
-    
-    # Koľko kusov ešte chýba do naplnenia cieľovej zásoby na X dní
-    needed_for_target = max(0, target_stock_needed - current_stock)
 
     # Agregácia obsadenosti
     obsadenost_lokacii = df_sku_aktual.groupby(loc_col_sku).agg({
@@ -147,7 +142,6 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
     )
     df_loc_merged[qty_col_sku] = df_loc_merged[qty_col_sku].fillna(0)
     
-    # Výpočet kapacity
     def calc_cap(row):
         l_w = row.get(loc_w_col, 120)
         l_d = row.get(loc_d_col, 80)
@@ -164,10 +158,8 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
         return False
         
     df_loc_merged['Rovnake_SKU_Pritomne'] = df_loc_merged[prod_col_sku].apply(has_same_sku)
-
     df_available = df_loc_merged[df_loc_merged['Volna_Kapacita'] > 0].copy()
 
-    # Zotriedenie kandidátov: 1. Konsolidácia, 2. Najväčšia voľná kapacita
     candidates = df_available.sort_values(
         by=['Rovnake_SKU_Pritomne', 'Volna_Kapacita'], 
         ascending=[False, False]
@@ -175,53 +167,85 @@ def find_best_locations_with_swap(selected_produkt, total_qty_to_store, days_tar
 
     allocations = []
     remaining_inbound = total_qty_to_store
-    remaining_target_need = needed_for_target
 
-    # PLNIACA LOGIKA
-    for idx, row in candidates.iterrows():
-        if remaining_inbound <= 0:
-            break
-
-        # Ak už máme pokrytú cieľovú zásobu na X dní, zvyšok ide AUTOMATICKY do SWAP
-        if remaining_target_need <= 0:
-            break
-
-        loc_free_cap = int(row['Volna_Kapacita'])
+    # --- SCHÉMA A: NULOVÁ PREDAJNOSŤ / NOVÝ PRODUKT ---
+    if is_zero_sales:
+        target_stock_needed = "1 Lokácia (Nové SKU)"
+        needed_for_target = "Max 1 Lokácia"
         
-        # PRAVIDLO: 1 lokácia = 1 SKU. 
-        # Aj keby sme potrebovali len napr. 2 ks do 30 dní, ale lokácia má voľných 30 ks,
-        # zaplníme lokáciu do jej maxima (pokiaľ máme dosť prichádzajúceho tovaru).
-        qty_to_place = min(remaining_inbound, loc_free_cap)
+        # Kontrola, či už produkt leží na sklade a či má existujúca lokácia voľné miesto
+        has_free_consolidated_loc = any(candidates['Rovnake_SKU_Pritomne']) if not candidates.empty else False
+        
+        # Ak už tovar leží na sklade a nemá voľné miesto na pôvodnej lokácii -> všetko novopríchodzie ide do SWAP
+        if current_stock > 0 and not has_free_consolidated_loc:
+            pass # 0 ks do primárnej lokácie
+        elif not candidates.empty:
+            # Alokujeme PRESNE 1 primárnu lokáciu (do jej max kapacity)
+            row = candidates.iloc[0]
+            loc_free_cap = int(row['Volna_Kapacita'])
+            qty_to_place = min(remaining_inbound, loc_free_cap)
 
-        reason = f"Primárna lokácia (Pokrytie zásoby na {days_target} dní)"
-        if row['Rovnake_SKU_Pritomne']:
-            reason += " - Konsolidácia"
+            reason = "Primárna lokácia (Nové / Bezpredajné SKU - Alokácia 1 lokácie)"
+            if row['Rovnake_SKU_Pritomne']:
+                reason += " - Konsolidácia"
 
-        allocations.append({
-            'Typ': '📍 PRIMÁRNA LOKÁCIA',
-            'Location': row[loc_col_loc],
-            'Allocated_Qty': qty_to_place,
-            'Free_Before': loc_free_cap,
-            'Max_Cap': int(row['Max_Kapacita']),
-            'Reason': reason
-        })
+            allocations.append({
+                'Typ': '📍 PRIMÁRNA LOKÁCIA',
+                'Location': row[loc_col_loc],
+                'Allocated_Qty': qty_to_place,
+                'Free_Before': loc_free_cap,
+                'Max_Cap': int(row['Max_Kapacita']),
+                'Reason': reason
+            })
 
-        remaining_inbound -= qty_to_place
-        remaining_target_need = max(0, remaining_target_need - qty_to_place)
+            remaining_inbound -= qty_to_place
 
-    # AK ZOSTAL TOVAR -> IDE DO SWAP / NADZÁSOBA
+    # --- SCHÉMA B: ŠTANDARDNÝ PRODUKT S PREDAJMI ---
+    else:
+        daily_sales = monthly_sales / 30.0
+        target_stock_needed = math.ceil(daily_sales * days_target)
+        needed_for_target = max(0, target_stock_needed - current_stock)
+        remaining_target_need = needed_for_target
+
+        for idx, row in candidates.iterrows():
+            if remaining_inbound <= 0 or remaining_target_need <= 0:
+                break
+
+            loc_free_cap = int(row['Volna_Kapacita'])
+            qty_to_place = min(remaining_inbound, loc_free_cap)
+
+            reason = f"Primárna lokácia (Pokrytie zásoby na {days_target} dní)"
+            if row['Rovnake_SKU_Pritomne']:
+                reason += " - Konsolidácia"
+
+            allocations.append({
+                'Typ': '📍 PRIMÁRNA LOKÁCIA',
+                'Location': row[loc_col_loc],
+                'Allocated_Qty': qty_to_place,
+                'Free_Before': loc_free_cap,
+                'Max_Cap': int(row['Max_Kapacita']),
+                'Reason': reason
+            })
+
+            remaining_inbound -= qty_to_place
+            remaining_target_need = max(0, remaining_target_need - qty_to_place)
+
+    # --- VŠETKO OSTATNÉ IDE DO SWAP ---
     if remaining_inbound > 0:
+        swap_reason = "Nadzásoba pre nové/bezpredajné SKU (nad rámec 1 primárnej lokácie)" if is_zero_sales else f"Nadzásoba presahujúca cieľovú zásobu na {days_target} dní"
+        
         allocations.append({
             'Typ': '🔄 SWAP / NADZÁSOBA',
             'Location': 'PALETOVÁ ZÓNA / SWAP',
             'Allocated_Qty': remaining_inbound,
             'Free_Before': '-',
             'Max_Cap': '-',
-            'Reason': f"Nadzásoba presahujúca cieľovú zásobu na {days_target} dní"
+            'Reason': swap_reason
         })
 
     summary_info = {
         'monthly_sales': int(monthly_sales),
+        'is_zero_sales': is_zero_sales,
         'target_days': days_target,
         'target_stock_needed': target_stock_needed,
         'current_stock': int(current_stock),
@@ -245,7 +269,7 @@ with tab1:
         selected_produkt = st.selectbox("Vyber Produkt (Kód)", options=seznam_produktov)
         
     with col_input2:
-        qty_input = st.number_input("Počet kusov na príjme", min_value=1, value=10, step=1)
+        qty_input = st.number_input("Počet kusov na príjme", min_value=1, value=20, step=1)
 
     if selected_produkt:
         prod_info = df_produkty[df_produkty[prod_col_prod] == selected_produkt].iloc[0]
@@ -255,7 +279,8 @@ with tab1:
         col_d1.metric("Názov produktu", str(prod_info.get('Název produktu', 'N/A')))
         
         prodeje_val = prod_info.get('Prodeje měsíc', 0)
-        col_d2.metric("Predaje / mesiac", int(prodeje_val) if not pd.isna(prodeje_val) else 0)
+        sales_display = int(prodeje_val) if not pd.isna(prodeje_val) else 0
+        col_d2.metric("Predaje / mesiac", f"{sales_display} ks" if sales_display > 0 else "0 ks (NOVÝ/BEZ PREDAJOV)")
         
         stoh_val = prod_info.get('Stohovateľnosť', 1)
         col_d3.metric("Stohovateľnosť", int(stoh_val) if not pd.isna(stoh_val) else 1)
@@ -274,13 +299,18 @@ with tab1:
             df_produkty
         )
         
-        # Zobrazenie sumarizácie zásoby
         st.subheader("📊 Analýza potrieb zásoby")
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         col_s1.metric("Predaj za mesiac", f"{summary['monthly_sales']} ks")
-        col_s2.metric(f"Cieľová zásoba ({target_days} dní)", f"{summary['target_stock_needed']} ks")
-        col_s3.metric("Aktuálne na sklade", f"{summary['current_stock']} ks")
-        col_s4.metric("Chýba do primárnej zásoby", f"{summary['needed_for_target']} ks")
+        
+        if summary['is_zero_sales']:
+            col_s2.metric("Režim produktu", "🆕 NOVÝ / BEZ PREDAJOV")
+            col_s3.metric("Aktuálne na sklade", f"{summary['current_stock']} ks")
+            col_s4.metric("Pravidlo alokácie", "Max 1 primárna lokácia")
+        else:
+            col_s2.metric(f"Cieľová zásoba ({target_days} dní)", f"{summary['target_stock_needed']} ks")
+            col_s3.metric("Aktuálne na sklade", f"{summary['current_stock']} ks")
+            col_s4.metric("Chýba do primárnej zásoby", f"{summary['needed_for_target']} ks")
 
         st.markdown("---")
         st.subheader("📍 Návrh Zaskladnenia a SWAPu:")
@@ -288,12 +318,11 @@ with tab1:
         alloc_df = pd.DataFrame(allocations)
         alloc_df.columns = ["Typ uloženia", "Lokácia", "Počet ks", "Voľná kap. pred", "Max Kapacita", "Dôvod / Poznámka"]
         
-        # Farebné zvýraznenie tabuľky
         st.dataframe(alloc_df, use_container_width=True)
 
 with tab2:
     st.subheader("Náhľad na dáta v systéme")
-    subtab1, subtab2, subtab3 = subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations / Location", "Produkty"])
+    subtab1, subtab2, subtab3 = st.tabs(["SKU aktuál", "Locations / Location", "Produkty"])
     
     with subtab1:
         st.dataframe(df_sku_aktual, use_container_width=True)
